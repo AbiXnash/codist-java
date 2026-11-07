@@ -21,7 +21,8 @@ type Cost struct {
 }
 
 var (
-	dbReceiver   = regexp.MustCompile(`(?i)(repository|repo|dao|jdbctemplate|entitymanager)$|^em$`)
+	dbReceiver   = regexp.MustCompile(`(?i)(repository|repo|dao|jdbctemplate|jdbcclient|entitymanager)$|^em$`)
+	objectMethod = map[string]bool{"toString": true, "equals": true, "hashCode": true, "getClass": true}
 	dbMethod     = regexp.MustCompile(`^(find|save|delete|exists|count|get(One|ReferenceById)|query|update|persist|merge|execute|createQuery|createNativeQuery|batchUpdate)`)
 	remoteObject = regexp.MustCompile(`(?i)(client|resttemplate|kafkatemplate|rabbittemplate|redistemplate|mongotemplate|webclient|restclient|feign|gateway|api|http|stub|proxy)$`)
 	loopTypes    = map[string]bool{"for_statement": true, "enhanced_for_statement": true, "while_statement": true, "do_statement": true}
@@ -95,7 +96,9 @@ func measure(f *File, body *ts.Node, types map[string]string) Cost {
 			}
 			declared := simpleType(types[obj])
 			io := false
-			if (dbReceiver.MatchString(obj) || dbReceiver.MatchString(declared)) && dbMethod.MatchString(name) {
+			// A field declared as a repository or DAO goes to the database whatever its methods are called (priceOf,
+			// loadTotals); a name that only looks like one needs a data-access method name too.
+			if (dbReceiver.MatchString(declared) && !objectMethod[name]) || (dbReceiver.MatchString(obj) && dbMethod.MatchString(name)) {
 				c.DBCalls++
 				io = true
 			} else if obj != "" && (remoteObject.MatchString(obj) || remoteObject.MatchString(declared)) {

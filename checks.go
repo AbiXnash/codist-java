@@ -2,6 +2,7 @@ package java
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 
 	ts "github.com/odvcencio/gotreesitter"
@@ -153,6 +154,19 @@ func (c *checker) call(n *ts.Node, sc scope) {
 				"When nothing is found this throws NoSuchElementException, which reaches users as a 500 error instead of a clear 404 or 400.",
 				`.orElseThrow(() -> new NotFoundException("No order " + id))`)
 		}
+	case obj == "UUID" && name == "randomUUID" && c.inRetryLoop(n):
+		c.add(n, "retry-new-id", "high", "A new random id on every retry",
+			"Each attempt sends a different id, so the other side cannot tell a retry from a new request. If an earlier attempt "+
+				"went through before timing out, the work is done twice, such as a second charge.",
+			"Make the id once, before the loop, and send the same one on every attempt.")
+	case name == "skip" && args != nil && args.NamedChildCount() == 1 && regexp.MustCompile(`^(java\.lang\.)?(Exception|Throwable|RuntimeException)\.class$`).MatchString(c.f.text(args.NamedChild(0))),
+		name == "skipLimit" && args != nil && args.NamedChildCount() == 1 && c.f.text(args.NamedChild(0)) == "Integer.MAX_VALUE":
+		c.add(n, "batch-skip-all", "high", "Batch step skips every failure",
+			"Any error on any item is skipped and the step still finishes as COMPLETED, so items are lost without the run failing "+
+				"or anyone being told.",
+			"Skip only the specific exceptions you expect, with a small skipLimit, and record skipped items with a SkipListener.")
+	case obj == "Duration" && (name == "ofMillis" || name == "ofSeconds") && args != nil && args.NamedChildCount() == 1:
+		c.durationUnit(n, name, args.NamedChild(0))
 	case sqlMethods[name] && args != nil && args.NamedChildCount() > 0:
 		if first := args.NamedChild(0); first.Type(lang) == "binary_expression" && strings.Contains(c.f.text(first), "+") && strings.Contains(c.f.text(first), `"`) {
 			if !allLiterals(c.f, first) {
@@ -281,6 +295,7 @@ func (c *checker) methodChecks(n *ts.Node) {
 			mods = c.f.text(k)
 		}
 	}
+	c.unusedPathVariable(n)
 	if strings.Contains(mods, "@Transactional") && regexp.MustCompile(`\bprivate\b`).MatchString(mods) {
 		c.add(n, "transactional-private", "high", "@Transactional on a private method does nothing",
 			"Spring applies transactions through a proxy, which only sees public methods called from another bean. The code runs without a transaction.",
@@ -355,4 +370,80 @@ func (c *checker) addAt(start, end int, rule, severity, title, detail, suggestio
 		}
 	}
 	c.out = append(c.out, Issue{Rule: rule, Severity: severity, Title: title, Detail: detail, Suggestion: suggestion, Line: start, End: end})
+}
+
+// durationUnit finds a time written in one unit and passed as another: Duration.ofMillis(24 * 60 * 60) is 86.4
+// seconds, not a day, and Duration.ofSeconds(3_600_000) is 41 days, not an hour.
+func (c *checker) durationUnit(n *ts.Node, name string, arg *ts.Node) {
+	v, ok := constant(c.f, arg)
+	if !ok || v <= 0 {
+		return
+	}
+	switch {
+	case name == "ofMillis" && v%3600 == 0 && v%1000 != 0:
+		c.add(n, "duration-unit", "high", "Seconds passed as milliseconds",
+			"Duration.ofMillis("+c.f.text(arg)+") is "+itoa(int(v/1000))+"."+itoa(int(v%1000/100))+" seconds. The number is a whole count of hours in seconds, so it was most likely meant as seconds.",
+			"Duration.ofSeconds("+c.f.text(arg)+"), or better Duration.ofHours(...) / ofMinutes(...).")
+	case name == "ofSeconds" && v%3_600_000 == 0:
+		c.add(n, "duration-unit", "high", "Milliseconds passed as seconds",
+			"Duration.ofSeconds("+c.f.text(arg)+") is "+itoa(int(v/86400))+" days. The number is a whole count of hours in milliseconds, so it was most likely meant as milliseconds.",
+			"Duration.ofMillis("+c.f.text(arg)+"), or better Duration.ofHours(...) / ofMinutes(...).")
+	}
+}
+
+// constant works out a whole-number expression made only of literals and *, such as 24 * 60 * 60.
+func constant(f *File, n *ts.Node) (int64, bool) {
+	switch n.Type(lang) {
+	case "decimal_integer_literal":
+		v, err := strconv.ParseInt(strings.TrimRight(strings.ReplaceAll(f.text(n), "_", ""), "lL"), 10, 64)
+		return v, err == nil
+	case "parenthesized_expression":
+		if n.NamedChildCount() == 1 {
+			return constant(f, n.NamedChild(0))
+		}
+	case "binary_expression":
+		if op := field(n, "operator"); op != nil && f.text(op) == "*" {
+			a, ok1 := constant(f, field(n, "left"))
+			b, ok2 := constant(f, field(n, "right"))
+			return a * b, ok1 && ok2
+		}
+	}
+	return 0, false
+}
+
+// unusedPathVariable finds a value the URL names that the method never reads, such as a customerId in
+// /customers/{customerId}/orders/{orderId}: the request is served whatever it says, so when it names an owner, any
+// caller can reach another owner's data.
+func (c *checker) unusedPathVariable(n *ts.Node) {
+	ps, body := field(n, "parameters"), field(n, "body")
+	if ps == nil || body == nil {
+		return
+	}
+	text := c.f.text(body)
+	for _, p := range named(ps) {
+		if p.Type(lang) != "formal_parameter" || !strings.Contains(c.f.text(p), "@PathVariable") {
+			continue
+		}
+		name := c.f.text(field(p, "name"))
+		if name == "" || regexp.MustCompile(`\b`+regexp.QuoteMeta(name)+`\b`).MatchString(text) {
+			continue
+		}
+		c.add(n, "unused-path-variable", "high", "The URL's "+name+" is never used",
+			"The request is served whatever "+name+" says. When it names an owner, such as a customer or account, any caller "+
+				"can read or change another owner's data by changing the other id in the URL.",
+			"Check that the record belongs to "+name+", for example .filter(o -> o.customerId() == "+name+"), and answer 404 when it does not.")
+	}
+}
+
+// inRetryLoop says n is inside a loop that catches errors and goes round again: a retry.
+func (c *checker) inRetryLoop(n *ts.Node) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		switch p.Type(lang) {
+		case "method_declaration", "lambda_expression", "class_body":
+			return false
+		case "for_statement", "while_statement", "do_statement", "enhanced_for_statement":
+			return strings.Contains(c.f.text(p), "catch")
+		}
+	}
+	return false
 }

@@ -37,6 +37,17 @@ var checkCases = []struct {
 	{"equals without hashCode", `class A { public boolean equals(Object o) { return true; } }`, []string{"equals-without-hashcode"}},
 	{"equals with hashCode is fine", `class A { public boolean equals(Object o) { return true; } public int hashCode() { return 1; } }`, nil},
 	{"shared date format", `class A { private static final SimpleDateFormat F = new SimpleDateFormat("yyyy"); }`, []string{"shared-date-format"}},
+	{"N+1 on any repository method", `class A { ProductRepository products; long a(List<Long> ids) { long s = 0; for (Long id : ids) { s += products.priceOf(id); } return s; } }`, []string{"slow-call-in-loop"}},
+	{"seconds as millis", `class A { Duration a() { return Duration.ofMillis(24 * 60 * 60); } }`, []string{"duration-unit"}},
+	{"millis as seconds", `class A { Duration a() { return Duration.ofSeconds(3_600_000); } }`, []string{"duration-unit"}},
+	{"real millis are fine", `class A { Duration a() { return Duration.ofMillis(24 * 60 * 60 * 1000); } }`, nil},
+	{"small millis are fine", `class A { Duration a() { return Duration.ofMillis(500); } }`, nil},
+	{"path variable unused", `class A { @GetMapping("/{customerId}/orders/{orderId}") Order one(@PathVariable long customerId, @PathVariable long orderId) { return orders.findById(orderId).orElseThrow(); } }`, []string{"unused-path-variable"}},
+	{"path variable used", `class A { @GetMapping("/{customerId}/orders/{orderId}") Order one(@PathVariable long customerId, @PathVariable long orderId) { return orders.findById(orderId).filter(o -> o.customerId() == customerId).orElseThrow(); } }`, nil},
+	{"new id on each retry", `class A { String a(long amount) throws Exception { for (int i = 1; ; i++) { try { return gateway.charge(UUID.randomUUID().toString(), amount); } catch (Timeout e) { if (i == 3) throw e; } } } }`, []string{"retry-new-id", "slow-call-in-loop"}},
+	{"new id per item is fine", `class A { void a(List<Item> items) { for (Item it : items) { it.setId(UUID.randomUUID()); } } }`, nil},
+	{"batch skips everything", `class A { Step s() { return builder.faultTolerant().skip(Exception.class).skipLimit(Integer.MAX_VALUE).build(); } }`, []string{"batch-skip-all"}},
+	{"batch skips one kind", `class A { Step s() { return builder.faultTolerant().skip(FlatFileParseException.class).skipLimit(10).build(); } }`, nil},
 	{"N+1", `class A { OrderRepository orders; void a(List<Long> ids) { for (Long id : ids) { orders.findById(id); } } }`, []string{"slow-call-in-loop"}},
 }
 
