@@ -27,6 +27,7 @@ type Facts struct {
 	// Optional names the project's methods that return an Optional, wherever they are declared. A name some
 	// other project method declares with another return type is left out, so a call to it is never guessed.
 	Optional map[string]bool
+	Habits   *Habits // the project's own habits; code that breaks a strong one is reported
 }
 
 // FactsOf gathers Facts from parsed files, usually every main Java file of the project.
@@ -43,7 +44,7 @@ func FactsOf(files []*File) *Facts {
 			}
 		}
 	}
-	facts := &Facts{Optional: map[string]bool{}}
+	facts := &Facts{Optional: map[string]bool{}, Habits: MineHabits(files)}
 	for name, opt := range returns {
 		if opt {
 			facts.Optional[name] = true
@@ -62,6 +63,7 @@ func CheckWith(f *File, lines map[int]bool, facts *Facts) []Issue {
 	}
 	c := &checker{f: f, lines: lines, test: strings.Contains(f.Path, "/src/test/"), facts: facts}
 	c.walk(f.Root, scope{})
+	c.habitIssues(facts.Habits)
 	for _, t := range f.Types {
 		c.typeChecks(t)
 	}
