@@ -54,6 +54,12 @@ func MineHabits(files []*File) *Habits {
 	builds := map[string]map[string]int{}  // type -> factory -> uses ("new" = constructor)
 	filters := map[string]map[string]int{} // table -> filter -> queries with it ("" = every query)
 	factories := factoryMethods(files)
+	project := map[string]bool{} // the project's own types: only their helpers make a habit, not Long.parseLong
+	for _, f := range files {
+		for _, t := range f.Types {
+			project[t.Name] = true
+		}
+	}
 	for _, f := range files {
 		if f.Root == nil {
 			continue
@@ -66,8 +72,8 @@ func MineHabits(files []*File) *Habits {
 		walkAll(f.Root, func(n *ts.Node) {
 			switch n.Type(lang) {
 			case "method_invocation":
-				if name, helper, ok := accessorUse(f, n); ok {
-					count(wraps, name, helper)
+				if key, helper, ok := accessorUse(f, n); ok && (helper == "" || project[helper[:strings.Index(helper, ".")]]) {
+					count(wraps, key, helper)
 				}
 				if t, m := f.text(field(n, "object")), f.text(field(n, "name")); factories[t+"."+m] && !own[t] {
 					count(builds, t, t+"."+m)
