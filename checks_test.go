@@ -17,6 +17,11 @@ var checkCases = []struct {
 	{"printStackTrace", `class A { void a() { try { x(); } catch (Exception e) { e.printStackTrace(); } } }`, []string{"print-stack-trace"}},
 	{"console", `class A { void a() { System.out.println("hi"); } }`, []string{"system-out"}},
 	{"optional get on find", `class A { Order a(long id) { return repo.findById(id).get(); } }`, []string{"optional-get"}},
+	{"jdbc client sql joined", `class A { List<E> a(String q) { return jdbc.sql(SELECT + " WHERE name LIKE '%" + q + "%'").query(this::row).list(); } }`, []string{"sql-concatenation"}},
+	{"jdbc client sql from constants", `class A { List<E> a() { return jdbc.sql(SELECT + " WHERE deleted_at IS NULL" + ORDER).query(this::row).list(); } }`, nil},
+	{"bigdecimal from double arithmetic", `class A { BigDecimal a(BigDecimal y, double percent) { return y.multiply(new BigDecimal(1 + percent / 100)); } }`, []string{"bigdecimal-double"}},
+	{"bigdecimal from int arithmetic", `class A { BigDecimal a(int n) { return new BigDecimal(n * 100 + 1); } }`, nil},
+	{"bigdecimal from a cast", `class A { BigDecimal a(long n) { return new BigDecimal((double) n / 3); } }`, []string{"bigdecimal-double"}},
 	{"optional get after check", `class A { Order a(long id) { Optional<Order> o = repo.findById(id); if (o.isPresent()) { return o.get(); } return null; } }`, nil},
 	{"map get is fine", `class A { String a(Map<String,String> m) { return m.get("k"); } }`, nil},
 	{"string ==", `class A { boolean a(String s) { return s == "OPEN"; } }`, []string{"string-identity"}},
@@ -76,5 +81,44 @@ func TestChecksOnlyChangedLines(t *testing.T) {
 	}
 	if tests := Check(Parse("svc/src/test/java/ATest.java", []byte(src)), nil); len(tests) != 0 {
 		t.Errorf("console output in tests is fine: %+v", tests)
+	}
+}
+
+func TestOptionalFromProjectFacts(t *testing.T) {
+	repo := Parse("Repo.java", []byte(`class Repo { Optional<Dept> find(long id) { return null; } List<Dept> all() { return null; } }`))
+	use := Parse("Use.java", []byte(`class Use { Dept a(long id) { return repo.find(id).get(); } Dept b() { return repo.all().get(0); } }`))
+	if got := CheckWith(use, nil, nil); len(got) != 0 {
+		t.Fatalf("without facts a custom find is unknown, got %v", got)
+	}
+	got := CheckWith(use, nil, FactsOf([]*File{repo, use}))
+	if len(got) != 1 || got[0].Rule != "optional-get" || got[0].Line != 1 {
+		t.Fatalf("want one optional-get from the project's own find, got %v", got)
+	}
+	// A name another project method declares with a different return type is not guessed.
+	other := Parse("Other.java", []byte(`class Other { Dept find(long id) { return null; } }`))
+	if got := CheckWith(use, nil, FactsOf([]*File{repo, other, use})); len(got) != 0 {
+		t.Fatalf("an ambiguous name must not be flagged, got %v", got)
+	}
+}
+
+// The loop finding points at the loop, so a change above it (an annotation, a comment) keeps it the same issue.
+func TestSlowCallPointsAtTheLoop(t *testing.T) {
+	src := `class D {
+    private final DeptRepository departments;
+    @Transactional(readOnly = true)
+    List<String> names(List<Long> ids) {
+        List<String> out = new ArrayList<>();
+        for (Long id : ids) {
+            out.add(departments.findById(id).orElseThrow().name());
+        }
+        return out;
+    }
+}`
+	got := Check(Parse("D.java", []byte(src)), nil)
+	if len(got) != 1 || got[0].Rule != "slow-call-in-loop" || got[0].Line != 6 || got[0].End != 8 {
+		t.Fatalf("want the loop at lines 6-8, got %+v", got)
+	}
+	if got := Check(Parse("D.java", []byte(src)), map[int]bool{3: true}); len(got) != 0 {
+		t.Errorf("changing only the annotation is not a change to the loop, got %+v", got)
 	}
 }

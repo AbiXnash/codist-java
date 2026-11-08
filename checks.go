@@ -20,11 +20,47 @@ type Issue struct {
 
 // Check runs every check on a parsed file and returns what it finds. lines limits results to
 // those lines (the lines a commit changed); nil means the whole file.
-func Check(f *File, lines map[int]bool) []Issue {
+func Check(f *File, lines map[int]bool) []Issue { return CheckWith(f, lines, nil) }
+
+// Facts is what the checks know about the whole project beyond the file they read. Nil means nothing.
+type Facts struct {
+	// Optional names the project's methods that return an Optional, wherever they are declared. A name some
+	// other project method declares with another return type is left out, so a call to it is never guessed.
+	Optional map[string]bool
+}
+
+// FactsOf gathers Facts from parsed files, usually every main Java file of the project.
+func FactsOf(files []*File) *Facts {
+	returns := map[string]bool{}
+	for _, f := range files {
+		for _, t := range f.Types {
+			for _, m := range t.Methods {
+				opt := strings.HasPrefix(simpleTypeRaw(m.Returns), "Optional")
+				if seen, ok := returns[m.Name]; ok {
+					opt = opt && seen
+				}
+				returns[m.Name] = opt
+			}
+		}
+	}
+	facts := &Facts{Optional: map[string]bool{}}
+	for name, opt := range returns {
+		if opt {
+			facts.Optional[name] = true
+		}
+	}
+	return facts
+}
+
+// CheckWith runs the checks on a file, using facts about the rest of the project when given.
+func CheckWith(f *File, lines map[int]bool, facts *Facts) []Issue {
 	if f.Root == nil {
 		return nil
 	}
-	c := &checker{f: f, lines: lines, test: strings.Contains(f.Path, "/src/test/")}
+	if facts == nil {
+		facts = &Facts{}
+	}
+	c := &checker{f: f, lines: lines, test: strings.Contains(f.Path, "/src/test/"), facts: facts}
 	c.walk(f.Root, scope{})
 	for _, t := range f.Types {
 		c.typeChecks(t)
@@ -36,6 +72,7 @@ type checker struct {
 	f     *File
 	lines map[int]bool
 	test  bool
+	facts *Facts
 	out   []Issue
 }
 
@@ -62,11 +99,13 @@ func (c *checker) add(n *ts.Node, rule, severity, title, detail, suggestion stri
 }
 
 var (
-	secretName  = regexp.MustCompile(`(?i)(password|passwd|secret|api_?key|token|credential)s?$`)
-	sqlMethods  = map[string]bool{"createQuery": true, "createNativeQuery": true, "query": true, "queryForObject": true, "queryForList": true, "update": true, "execute": true, "executeQuery": true, "executeUpdate": true, "prepareStatement": true}
-	boxedTypes  = map[string]bool{"Long": true, "Integer": true, "Short": true, "Byte": true, "Double": true, "Float": true, "Character": true, "Boolean": true, "BigDecimal": true}
-	numberLit   = regexp.MustCompile(`^-?[0-9][0-9_]*(\.[0-9_]+)?[dDfF]?$`)
-	wholeNumber = regexp.MustCompile(`^-?[0-9][0-9_]*[lL]?$`)
+	secretName = regexp.MustCompile(`(?i)(password|passwd|secret|api_?key|token|credential)s?$`)
+	sqlMethods = map[string]bool{"createQuery": true, "createNativeQuery": true, "query": true, "queryForObject": true, "queryForList": true, "update": true, "execute": true, "executeQuery": true, "executeUpdate": true, "prepareStatement": true,
+		"sql": true, "queryForMap": true, "queryForRowSet": true, "queryForStream": true, "batchUpdate": true, "addBatch": true, "prepareCall": true} // sql: Spring's JdbcClient and R2DBC's DatabaseClient
+	constantName = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
+	boxedTypes   = map[string]bool{"Long": true, "Integer": true, "Short": true, "Byte": true, "Double": true, "Float": true, "Character": true, "Boolean": true, "BigDecimal": true}
+	numberLit    = regexp.MustCompile(`^-?[0-9][0-9_]*(\.[0-9_]+)?[dDfF]?$`)
+	wholeNumber  = regexp.MustCompile(`^-?[0-9][0-9_]*[lL]?$`)
 )
 
 func (c *checker) walk(n *ts.Node, sc scope) {
@@ -189,7 +228,7 @@ func (c *checker) optional(n *ts.Node, sc scope) bool {
 		return strings.HasPrefix(simpleTypeRaw(sc[c.f.text(n)]), "Optional")
 	case "method_invocation":
 		name := c.f.text(field(n, "name"))
-		return strings.HasPrefix(name, "findBy") || name == "findById" || name == "findFirst" || name == "findAny"
+		return strings.HasPrefix(name, "findBy") || name == "findById" || name == "findFirst" || name == "findAny" || c.facts.Optional[name]
 	}
 	return false
 }
@@ -201,9 +240,13 @@ func simpleTypeRaw(t string) string {
 	return strings.TrimSpace(t)
 }
 
+// allLiterals says the text is fixed: string literals and constants named in capitals, such as SELECT, joined.
 func allLiterals(f *File, n *ts.Node) bool {
-	if n.Type(lang) == "string_literal" {
+	if n.Type(lang) == "string_literal" || n.Type(lang) == "identifier" && constantName.MatchString(f.text(n)) {
 		return true
+	}
+	if n.Type(lang) == "parenthesized_expression" && n.NamedChildCount() == 1 {
+		return allLiterals(f, n.NamedChild(0))
 	}
 	if n.Type(lang) != "binary_expression" {
 		return false
@@ -265,14 +308,38 @@ func (c *checker) creation(n *ts.Node, sc scope) {
 	if typ == "BigDecimal" && args != nil && args.NamedChildCount() == 1 {
 		a := args.NamedChild(0)
 		text := c.f.text(a)
-		isDouble := a.Type(lang) == "decimal_floating_point_literal" ||
-			a.Type(lang) == "identifier" && (sc[text] == "double" || sc[text] == "float" || sc[text] == "Double")
-		if isDouble || numberLit.MatchString(text) && !wholeNumber.MatchString(text) {
+		if c.isDouble(a, sc) || numberLit.MatchString(text) && !wholeNumber.MatchString(text) {
 			c.add(n, "bigdecimal-double", "medium", "BigDecimal made from a double",
 				"new BigDecimal(0.1) is 0.1000000000000000055511151231257827: the double's binary error is kept. Money totals drift and equality checks fail.",
 				`new BigDecimal("0.1") or BigDecimal.valueOf(0.1)`)
 		}
 	}
+}
+
+// isDouble says an expression works out to a double or float: a floating literal or variable, a cast to one, a Math
+// function that returns one, or arithmetic with any of these, such as 1 + percent / 100 with a double percent.
+func (c *checker) isDouble(n *ts.Node, sc scope) bool {
+	switch n.Type(lang) {
+	case "decimal_floating_point_literal":
+		return true
+	case "identifier":
+		t := simpleTypeRaw(sc[c.f.text(n)])
+		return t == "double" || t == "float" || t == "Double" || t == "Float"
+	case "cast_expression":
+		t := c.f.text(field(n, "type"))
+		return t == "double" || t == "float"
+	case "parenthesized_expression":
+		return n.NamedChildCount() == 1 && c.isDouble(n.NamedChild(0), sc)
+	case "method_invocation":
+		name := c.f.text(field(n, "name"))
+		return c.f.text(field(n, "object")) == "Math" && (name == "pow" || name == "sqrt" || name == "random" || name == "exp" || name == "log")
+	case "binary_expression":
+		switch c.f.text(field(n, "operator")) {
+		case "+", "-", "*", "/", "%":
+			return c.isDouble(field(n, "left"), sc) || c.isDouble(field(n, "right"), sc)
+		}
+	}
+	return false
 }
 
 func (c *checker) secret(n *ts.Node) {
@@ -325,7 +392,11 @@ func (c *checker) typeChecks(t Type) {
 			hash = m
 		}
 		if m.Cost.LoopIO > 0 {
-			c.addAt(m.Line, m.End, "slow-call-in-loop", "medium", "Database or remote call repeated in a loop",
+			from, to := m.Cost.LoopFrom, m.Cost.LoopTo
+			if from == 0 {
+				from, to = m.Line, m.End
+			}
+			c.addAt(from, to, "slow-call-in-loop", "medium", "Database or remote call repeated in a loop",
 				"Each pass makes a round trip, so time grows with the data: the N+1 problem. It is fast with test data and slow in production.",
 				"Load everything in one query (findAllById, a join or an IN clause) or one batched call, then loop in memory.")
 		}
