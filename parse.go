@@ -3,6 +3,7 @@
 package java
 
 import (
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -88,9 +89,13 @@ func Parse(path string, src []byte) *File {
 	tree, err := p.Parse(src)
 	f := &File{Path: path, Src: src, Lines: strings.Split(string(src), "\n")}
 	if err != nil || tree == nil {
+		slog.Warn("java file not parsed", "lib", "java", "path", path, "err", err)
 		return f
 	}
 	f.Root = tree.RootNode()
+	if f.Root.HasError() {
+		slog.Debug("java file has syntax errors; reading what parsed", "lib", "java", "path", path)
+	}
 	pkg := ""
 	var imports []string
 	for i := 0; i < f.Root.NamedChildCount(); i++ {

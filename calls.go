@@ -1,6 +1,7 @@
 package java
 
 import (
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -251,6 +252,7 @@ func BuildCallGraph(sources map[string][]byte, types []*Type) *CallGraph {
 		}
 	}
 	cg.linkRoutes(types)
+	slog.Debug("call graph built", "lib", "java", "files", len(sources), "methods", len(cg.methods), "called", len(cg.callers))
 	return cg
 }
 
