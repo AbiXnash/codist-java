@@ -1,6 +1,6 @@
 # codist-java
 
-The Java engine of [Codist](https://github.com/AbiXnash/codist): it reads Java source with a pure-Go tree-sitter
+The Java engine of [Codist](https://github.com/abxengg/codist): it reads Java source with a pure-Go tree-sitter
 parser, so no C compiler is needed, and finds:
 
 - **types and Spring facts**: classes, methods, fields, stereotypes (controller, service, repository, Feign client),
@@ -12,7 +12,7 @@ parser, so no C compiler is needed, and finds:
 - **cost hints**: loop depth, calls inside loops, and branching per method.
 
 ```go
-import java "github.com/AbiXnash/codist-java"
+import java "github.com/abxengg/codist-java"
 
 ix := java.Build(sources, buildFiles) // path -> content
 calls := java.BuildCallGraph(ix.Sources, ix.Types).Calls()
@@ -30,7 +30,7 @@ go test -tags 'grammar_subset grammar_subset_java' ./...
 Source available under the [PolyForm Noncommercial License 1.0.0](LICENSE): free for any noncommercial purpose, such
 as personal study, research, hobby projects and testing, and for use by charities, schools, public research and
 public health bodies and government institutions. **Using it for a business, or in anything sold, needs a commercial
-licence** from the author: open an issue at [github.com/AbiXnash/codist](https://github.com/AbiXnash/codist/issues)
+licence** from the author: open an issue at [github.com/abxengg/codist](https://github.com/abxengg/codist/issues)
 to ask. Third-party code included in Codist keeps its own licence.
 
 Required Notice: Copyright 2026 Abinash (https://github.com/AbiXnash)

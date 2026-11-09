@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AbiXnash/codist-git/testrepo"
+	"github.com/abxengg/codist-git/testrepo"
 )
 
 func shop(t *testing.T) *Index {
